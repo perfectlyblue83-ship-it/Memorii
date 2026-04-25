@@ -1,359 +1,282 @@
 'use strict';
 
-// ===================================================
-// DATA & STATE
-// ===================================================
-
+// ========== CONSTANTS ==========
 const SR_INTERVALS = [0, 1, 3, 7, 14, 28, 30, 60, 90];
 
+// ========== STATE ==========
 let state = {
   mode: 'sr',
-  currentYear: 0,
-  currentMonth: 0,
+  year: 2026,
+  month: 3,
   selectedDate: null,
   topics: [],
   journalNotes: {},
-  hoverReviewDates: [],
+  hoverDates: [],
+  flash: { queue: [], index: 0, answerShown: false, done: false }
 };
 
-// ===================================================
-// LOCAL STORAGE
-// ===================================================
-
+// ========== STORAGE ==========
 function loadData() {
   try {
-    const raw = localStorage.getItem('mnemo_data');
+    const raw = localStorage.getItem('mnemo_v3');
     if (raw) {
-      const parsed = JSON.parse(raw);
-      state.topics = parsed.topics || [];
-      state.journalNotes = parsed.journalNotes || {};
+      const d = JSON.parse(raw);
+      state.topics = Array.isArray(d.topics) ? d.topics : [];
+      state.journalNotes = d.journalNotes && typeof d.journalNotes === 'object' ? d.journalNotes : {};
     }
-  } catch (e) {
-    console.error('Failed to load data', e);
-    state.topics = [];
-    state.journalNotes = {};
-  }
+  } catch(e) { state.topics = []; state.journalNotes = {}; }
 }
 
 function saveData() {
   try {
-    const payload = { topics: state.topics, journalNotes: state.journalNotes };
-    localStorage.setItem('mnemo_data', JSON.stringify(payload));
-  } catch (e) {
-    console.error('Failed to save data', e);
-  }
+    localStorage.setItem('mnemo_v3', JSON.stringify({
+      topics: state.topics,
+      journalNotes: state.journalNotes
+    }));
+  } catch(e) {}
 }
 
-// ===================================================
-// DATE UTILITIES
-// ===================================================
-
+// ========== DATE UTILS ==========
 function todayStr() {
-  return formatDate(new Date());
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function formatDate(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+function fmtDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function parseDate(str) {
-  const [y, m, d] = str.split('-').map(Number);
-  return new Date(y, m - 1, d);
+function parseDate(s) {
+  const [y,m,d] = s.split('-').map(Number);
+  return new Date(y, m-1, d);
 }
 
-function addDays(str, n) {
-  const d = parseDate(str);
+function addDays(dateStr, n) {
+  const d = parseDate(dateStr);
   d.setDate(d.getDate() + n);
-  return formatDate(d);
+  return fmtDate(d);
 }
 
-function displayDate(str) {
-  const d = parseDate(str);
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+function displayDate(s) {
+  if (!s) return 'Select a date';
+  return parseDate(s).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function shortDate(str) {
-  const d = parseDate(str);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+function shortDate(s) {
+  return parseDate(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function daysFromToday(str) {
-  const today = parseDate(todayStr());
-  const target = parseDate(str);
-  return Math.round((target - today) / 86400000);
+function daysFromToday(s) {
+  return Math.round((parseDate(s) - parseDate(todayStr())) / 86400000);
 }
 
-// ===================================================
-// REVIEW DATE CALCULATION
-// ===================================================
-
-function calcAutoReviewDates(startDate) {
+// ========== REVIEW CALCULATION ==========
+function calcAutoReviews(startDate) {
   const dates = [startDate];
   for (let i = 1; i < SR_INTERVALS.length; i++) {
-    dates.push(addDays(dates[dates.length - 1], SR_INTERVALS[i]));
+    dates.push(addDays(dates[dates.length-1], SR_INTERVALS[i]));
   }
   return dates;
 }
 
-// ===================================================
-// CALENDAR RENDERING
-// ===================================================
+// ========== RENDER CALENDAR ==========
+function buildSRMap() {
+  const map = {};
+  state.topics.forEach(t => t.reviewDates?.forEach(d => { map[d] = (map[d] || 0) + 1; }));
+  return map;
+}
+
+function buildJournalMap() {
+  const map = {};
+  Object.keys(state.journalNotes).forEach(d => { if (state.journalNotes[d]?.trim()) map[d] = true; });
+  return map;
+}
 
 function renderCalendar() {
-  const grid = document.getElementById('calendarGrid');
-  const title = document.getElementById('monthTitle');
-
-  const year = state.currentYear;
-  const month = state.currentMonth;
-
-  const monthName = new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-  title.textContent = monthName;
-
-  const srMap = buildSRIndicatorMap();
-  const journalMap = buildJournalIndicatorMap();
-
-  const firstDay = new Date(year, month, 1).getDay();
+  const grid = document.getElementById('calGrid');
+  const label = document.getElementById('monthLabel');
+  const { year, month } = state;
+  label.textContent = new Date(year, month, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  
+  const srMap = buildSRMap();
+  const journalMap = buildJournalMap();
+  const today = todayStr();
+  const firstDow = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const daysInPrev = new Date(year, month, 0).getDate();
-
-  const today = todayStr();
+  
   grid.innerHTML = '';
-
+  
   for (let i = 0; i < 42; i++) {
-    const cell = document.createElement('div');
-    cell.className = 'cal-cell';
-
-    let dateStr, dayNum, isCurrentMonth;
-
-    if (i < firstDay) {
-      dayNum = daysInPrev - firstDay + i + 1;
+    let dateStr, dayNum;
+    if (i < firstDow) {
+      dayNum = daysInPrev - firstDow + i + 1;
       const pm = month === 0 ? 11 : month - 1;
       const py = month === 0 ? year - 1 : year;
-      dateStr = formatDate(new Date(py, pm, dayNum));
-      isCurrentMonth = false;
-      cell.classList.add('other-month');
-    } else if (i >= firstDay + daysInMonth) {
-      dayNum = i - firstDay - daysInMonth + 1;
+      dateStr = fmtDate(new Date(py, pm, dayNum));
+    } else if (i >= firstDow + daysInMonth) {
+      dayNum = i - firstDow - daysInMonth + 1;
       const nm = month === 11 ? 0 : month + 1;
       const ny = month === 11 ? year + 1 : year;
-      dateStr = formatDate(new Date(ny, nm, dayNum));
-      isCurrentMonth = false;
-      cell.classList.add('other-month');
+      dateStr = fmtDate(new Date(ny, nm, dayNum));
     } else {
-      dayNum = i - firstDay + 1;
-      dateStr = formatDate(new Date(year, month, dayNum));
-      isCurrentMonth = true;
+      dayNum = i - firstDow + 1;
+      dateStr = fmtDate(new Date(year, month, dayNum));
     }
-
-    cell.dataset.date = dateStr;
-
-    const dayEl = document.createElement('div');
-    dayEl.className = 'cell-day';
-    dayEl.textContent = dayNum;
-    cell.appendChild(dayEl);
-
+    
+    const cell = document.createElement('div');
+    cell.className = 'cal-cell';
+    if (i < firstDow || i >= firstDow + daysInMonth) cell.classList.add('other-month');
     if (dateStr === today) cell.classList.add('today');
     if (dateStr === state.selectedDate) cell.classList.add('selected');
-
-    if (state.hoverReviewDates.includes(dateStr)) {
-      cell.classList.add('review-highlight');
-      const tooltip = document.createElement('div');
-      tooltip.className = 'cell-tooltip visible';
-      const idx = state.hoverReviewDates.indexOf(dateStr);
-      tooltip.textContent = idx === 0 ? 'Start' : `Review ${idx}`;
-      cell.appendChild(tooltip);
-    }
-
-    const dots = document.createElement('div');
-    dots.className = 'cell-dots';
-
-    if (state.mode === 'sr' && srMap[dateStr] !== undefined) {
-      const badge = document.createElement('span');
-      badge.className = 'cell-badge blue';
-      badge.textContent = srMap[dateStr];
-      dots.appendChild(badge);
+    if (state.hoverDates.includes(dateStr)) cell.classList.add('hover-highlight');
+    
+    const num = document.createElement('div');
+    num.className = 'day-number';
+    num.textContent = dayNum;
+    cell.appendChild(num);
+    
+    const indicators = document.createElement('div');
+    indicators.className = 'cell-indicators';
+    
+    if (state.mode === 'sr' && srMap[dateStr]) {
+      const dot = document.createElement('div');
+      dot.className = 'dot-blue';
+      indicators.appendChild(dot);
+      if (srMap[dateStr] > 1) {
+        const badge = document.createElement('span');
+        badge.className = 'badge-number';
+        badge.textContent = srMap[dateStr];
+        indicators.appendChild(badge);
+      }
     }
     if (state.mode === 'journal' && journalMap[dateStr]) {
       const dot = document.createElement('div');
-      dot.className = 'cell-dot green';
-      dots.appendChild(dot);
+      dot.className = 'dot-green';
+      indicators.appendChild(dot);
     }
-    cell.appendChild(dots);
-
+    if (state.mode === 'flashcard' && srMap[dateStr]) {
+      const dot = document.createElement('div');
+      dot.className = 'dot-blue';
+      indicators.appendChild(dot);
+      if (srMap[dateStr] > 1) {
+        const badge = document.createElement('span');
+        badge.className = 'badge-number';
+        badge.textContent = srMap[dateStr];
+        indicators.appendChild(badge);
+      }
+    }
+    
+    cell.appendChild(indicators);
     cell.addEventListener('click', () => onDateClick(dateStr));
     if (state.mode === 'sr') {
-      cell.addEventListener('mouseenter', () => onDateHover(dateStr));
-      cell.addEventListener('mouseleave', onDateLeave);
+      cell.addEventListener('mouseenter', () => onCellHover(dateStr));
+      cell.addEventListener('mouseleave', onCellLeave);
     }
-
     grid.appendChild(cell);
   }
 }
 
-function buildSRIndicatorMap() {
-  const map = {};
-  state.topics.forEach(topic => {
-    topic.reviewDates.forEach(d => {
-      map[d] = (map[d] || 0) + 1;
-    });
-  });
-  return map;
-}
-
-function buildJournalIndicatorMap() {
-  const map = {};
-  Object.keys(state.journalNotes).forEach(d => {
-    if (state.journalNotes[d] && state.journalNotes[d].trim()) map[d] = true;
-  });
-  return map;
-}
-
-// ===================================================
-// DATE CLICK / HOVER
-// ===================================================
-
 function onDateClick(dateStr) {
   state.selectedDate = dateStr;
-  state.hoverReviewDates = [];
+  state.hoverDates = [];
   renderCalendar();
-  renderPanel();
+  if (state.mode === 'sr') renderSRView();
+  else if (state.mode === 'journal') renderJournalView();
+  else if (state.mode === 'flashcard') initFlashQueue();
 }
 
-function onDateHover(dateStr) {
-  const topicsStartingHere = state.topics.filter(t => t.startDate === dateStr);
-  if (topicsStartingHere.length === 0) {
-    if (state.hoverReviewDates.length > 0) {
-      state.hoverReviewDates = [];
-      renderCalendar();
-    }
+function onCellHover(dateStr) {
+  const topicsHere = state.topics.filter(t => t.startDate === dateStr);
+  if (!topicsHere.length) {
+    if (state.hoverDates.length) { state.hoverDates = []; renderCalendar(); }
     return;
   }
   const dates = new Set();
-  topicsStartingHere.forEach(t => t.reviewDates.forEach(d => dates.add(d)));
-  state.hoverReviewDates = [...dates];
+  topicsHere.forEach(t => t.reviewDates?.forEach(d => dates.add(d)));
+  state.hoverDates = [...dates];
   renderCalendar();
 }
 
-function onDateLeave() {
-  state.hoverReviewDates = [];
+function onCellLeave() {
+  if (!state.hoverDates.length) return;
+  state.hoverDates = [];
   renderCalendar();
 }
 
-// ===================================================
-// PANEL RENDERING
-// ===================================================
-
-function renderPanel() {
-  if (state.mode === 'sr') renderSRPanel();
-  else renderJournalPanel();
-}
-
-// --- SR Panel ---
-
-function renderSRPanel() {
-  const header = document.getElementById('srDateHeader');
-  const list = document.getElementById('topicsList');
-  const addBtn = document.getElementById('addTopicBtn');
-
+// ========== SR VIEW ==========
+function renderSRView() {
+  const head = document.getElementById('srHead');
+  const list = document.getElementById('srTopicList');
+  
   if (!state.selectedDate) {
-    header.textContent = 'Select a date';
+    head.textContent = 'Select a date';
     list.innerHTML = '';
-    addBtn.style.display = 'none';
   } else {
-    header.textContent = displayDate(state.selectedDate);
-    addBtn.style.display = 'block';
-
-    const dueTopics = state.topics.filter(t => t.reviewDates.includes(state.selectedDate));
-
+    head.textContent = displayDate(state.selectedDate);
+    const due = state.topics.filter(t => t.reviewDates?.includes(state.selectedDate));
     list.innerHTML = '';
-    if (dueTopics.length === 0) {
-      list.innerHTML = '<p class="no-topics">No topics on this date.</p>';
+    if (!due.length) {
+      list.innerHTML = '<div class="no-topics">No topics on this date.</div>';
     } else {
-      dueTopics.forEach(topic => {
-        list.appendChild(buildTopicCard(topic));
-      });
+      due.forEach(t => list.appendChild(buildTopicCard(t)));
     }
   }
-
   renderUpcoming();
 }
 
 function buildTopicCard(topic) {
+  const isOriginal = topic.reviewDates?.[0] === state.selectedDate;
+  const revIdx = topic.reviewDates?.indexOf(state.selectedDate) || 0;
   const card = document.createElement('div');
   card.className = 'topic-card';
-
-  const isOriginal = topic.reviewDates[0] === state.selectedDate;
-  const reviewIdx = topic.reviewDates.indexOf(state.selectedDate);
-
   card.innerHTML = `
-    <div class="topic-card-header">
-      <div class="topic-title">${escHtml(topic.title)}</div>
+    <div class="topic-header">
+      <div class="topic-title">${escapeHtml(topic.title)}</div>
       <div class="topic-actions">
-        <button class="btn-icon-sm" title="Edit" data-edit="${topic.id}">✏️</button>
-        <button class="btn-icon-sm danger" title="Delete" data-delete="${topic.id}">🗑️</button>
+        <button class="edit-btn" data-edit="${topic.id}">✏️ Edit</button>
+        <button class="delete-btn" data-del="${topic.id}">🗑️ Delete</button>
       </div>
     </div>
     <div class="topic-meta">
-      <span class="topic-badge ${isOriginal ? 'original' : 'review'}">${isOriginal ? 'Original' : `Review ${reviewIdx}`}</span>
-      <span class="topic-badge ${topic.mode}">${topic.mode === 'auto' ? '⚡ Auto' : '✍️ Manual'}</span>
-      <span class="topic-start">Started ${shortDate(topic.startDate)}</span>
+      <span class="topic-badge">${isOriginal ? 'Original' : `Review #${revIdx}`}</span>
+      <span class="topic-start">📅 ${shortDate(topic.startDate)}</span>
     </div>
-    ${topic.content ? `<div class="topic-content">${escHtml(topic.content)}</div>` : ''}
+    ${topic.content ? `<div class="topic-details">${escapeHtml(topic.content)}</div>` : ''}
   `;
-
-  card.querySelector('[data-edit]').addEventListener('click', () => openEditModal(topic.id));
-  card.querySelector('[data-delete]').addEventListener('click', () => openDeleteModal(topic.id));
-
+  card.querySelector('[data-edit]')?.addEventListener('click', () => openEditModal(topic.id));
+  card.querySelector('[data-del]')?.addEventListener('click', () => openDeleteModal(topic.id));
   return card;
 }
 
 function renderUpcoming() {
   const list = document.getElementById('upcomingList');
-  const count = document.getElementById('upcomingCount');
+  const badge = document.getElementById('upcomingCount');
   const today = todayStr();
   const horizon = addDays(today, 30);
-
-  const upcoming = [];
-  state.topics.forEach(topic => {
-    topic.reviewDates.forEach(d => {
-      if (d >= today && d <= horizon) {
-        upcoming.push({ date: d, title: topic.title, topicId: topic.id });
-      }
+  const items = [];
+  state.topics.forEach(t => {
+    t.reviewDates?.forEach(d => {
+      if (d >= today && d <= horizon) items.push({ date: d, title: t.title });
     });
   });
-  upcoming.sort((a, b) => a.date.localeCompare(b.date));
-
-  count.textContent = upcoming.length;
+  items.sort((a,b) => a.date.localeCompare(b.date));
+  badge.textContent = items.length;
   list.innerHTML = '';
-
-  if (upcoming.length === 0) {
-    list.innerHTML = `
-      <div class="empty-state">
-        <span class="empty-state-icon">🗓️</span>
-        <p class="empty-state-text">No reviews in the next 30 days.<br/>Add a topic to get started.</p>
-      </div>`;
+  if (!items.length) {
+    list.innerHTML = '<div class="empty-state">No reviews in the next 30 days.</div>';
     return;
   }
-
-  upcoming.forEach(item => {
+  items.forEach(item => {
     const diff = daysFromToday(item.date);
-    let dayLabel, dayClass;
-    if (diff === 0) { dayLabel = 'Today'; dayClass = 'today'; }
-    else if (diff === 1) { dayLabel = 'Tomorrow'; dayClass = 'soon'; }
-    else { dayLabel = `In ${diff} days`; dayClass = ''; }
-
+    const dayLabel = diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : `In ${diff} days`;
+    const dayClass = diff === 0 ? 'today' : '';
     const el = document.createElement('div');
     el.className = 'upcoming-item';
     el.innerHTML = `
-      <div class="upcoming-date-col">
-        <div class="upcoming-date">${shortDate(item.date)}</div>
-        <div class="upcoming-days ${dayClass}">${dayLabel}</div>
-      </div>
-      <div class="upcoming-divider"></div>
-      <div class="upcoming-title">${escHtml(item.title)}</div>
+      <div class="upcoming-date">${shortDate(item.date)}</div>
+      <div class="upcoming-days ${dayClass}">${dayLabel}</div>
+      <div class="upcoming-title">${escapeHtml(item.title)}</div>
     `;
     el.addEventListener('click', () => jumpToDate(item.date));
     list.appendChild(el);
@@ -362,153 +285,268 @@ function renderUpcoming() {
 
 function jumpToDate(dateStr) {
   const d = parseDate(dateStr);
-  state.currentYear = d.getFullYear();
-  state.currentMonth = d.getMonth();
+  state.year = d.getFullYear();
+  state.month = d.getMonth();
   state.selectedDate = dateStr;
-  state.hoverReviewDates = [];
+  state.hoverDates = [];
   renderCalendar();
-  renderPanel();
+  renderSRView();
 }
 
-// --- Journal Panel ---
+// ========== JOURNAL VIEW ==========
+let journalTimer = null;
 
-let journalSaveTimer = null;
-
-function renderJournalPanel() {
-  const header = document.getElementById('journalDateHeader');
-  const editor = document.getElementById('journalEditor');
-  const emptyState = document.getElementById('journalEmptyState');
-
+function renderJournalView() {
+  const head = document.getElementById('journalHead');
+  const ta = document.getElementById('journalTA');
+  
   if (!state.selectedDate) {
-    header.textContent = 'Select a date';
-    editor.style.display = 'none';
-    emptyState.style.display = 'flex';
+    head.textContent = 'Select a date';
+    ta.value = '';
+    ta.disabled = true;
+    document.getElementById('charCount').textContent = '0';
+    document.getElementById('wordCount').textContent = '0';
   } else {
-    header.textContent = displayDate(state.selectedDate);
-    emptyState.style.display = 'none';
-    editor.style.display = 'block';
-
+    head.textContent = displayDate(state.selectedDate);
+    ta.disabled = false;
     const text = state.journalNotes[state.selectedDate] || '';
-    const textarea = document.getElementById('journalTextarea');
-    textarea.value = text;
+    ta.value = text;
     updateJournalStats(text);
-
-    // Reset autosave indicator
-    const autosave = document.getElementById('journalAutosave');
-    autosave.textContent = '✓ Saved';
-    autosave.className = 'journal-autosave';
   }
 }
 
 function updateJournalStats(text) {
-  const chars = text.length;
+  document.getElementById('charCount').textContent = text.length;
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  document.getElementById('charCount').textContent = chars;
   document.getElementById('wordCount').textContent = words;
 }
 
-// ===================================================
-// MODAL: ADD / EDIT TOPIC
-// ===================================================
+// ========== FLASHCARD VIEW ==========
+function initFlashQueue() {
+  if (!state.selectedDate) {
+    state.flash = { queue: [], index: 0, answerShown: false, done: false };
+  } else {
+    const queue = state.topics.filter(t => t.reviewDates?.includes(state.selectedDate));
+    state.flash = { queue, index: 0, answerShown: false, done: false };
+  }
+  renderFlashView();
+}
 
-let modalManualDates = [];
-let modalEditId = null;
+function renderFlashView() {
+  const flashDateLabel = document.getElementById('flashDateLabel');
+  const flashProgress = document.getElementById('flashProgress');
+  const flashEmpty = document.getElementById('flashEmpty');
+  const flashNoDate = document.getElementById('flashNoDate');
+  const flashCardArea = document.getElementById('flashCardArea');
+  const flashComplete = document.getElementById('flashComplete');
+  const flashControls = document.getElementById('flashControls');
+  const flashQuestion = document.getElementById('flashQuestion');
+  const flashAnswer = document.getElementById('flashAnswer');
+  const flashAnswerText = document.getElementById('flashAnswerText');
+  
+  if (flashDateLabel) flashDateLabel.textContent = state.selectedDate ? displayDate(state.selectedDate) : '';
+  if (flashProgress) flashProgress.textContent = '';
+  
+  const hideAll = () => {
+    if (flashEmpty) flashEmpty.style.display = 'none';
+    if (flashNoDate) flashNoDate.style.display = 'none';
+    if (flashCardArea) flashCardArea.style.display = 'none';
+    if (flashComplete) flashComplete.style.display = 'none';
+    if (flashControls) flashControls.style.display = 'none';
+  };
+  hideAll();
+  
+  if (!state.selectedDate) {
+    if (flashNoDate) flashNoDate.style.display = 'block';
+    return;
+  }
+  
+  const { queue, index, answerShown, done } = state.flash;
+  
+  if (!queue.length) {
+    if (flashEmpty) flashEmpty.style.display = 'block';
+    return;
+  }
+  
+  if (done) {
+    if (flashComplete) flashComplete.style.display = 'block';
+    if (flashProgress) flashProgress.textContent = `${queue.length} / ${queue.length} reviewed`;
+    return;
+  }
+  
+  if (flashProgress) flashProgress.textContent = `Card ${index + 1} of ${queue.length}`;
+  if (flashCardArea) flashCardArea.style.display = 'block';
+  if (flashControls) flashControls.style.display = 'flex';
+  
+  const topic = queue[index];
+  if (flashQuestion) flashQuestion.textContent = topic.title;
+  
+  if (answerShown) {
+    if (flashAnswer) flashAnswer.classList.remove('hidden');
+    const content = topic.content?.trim();
+    if (flashAnswerText) flashAnswerText.textContent = content || '— No additional details —';
+    const showBtn = document.getElementById('showAnswerBtn');
+    if (showBtn) { showBtn.disabled = true; showBtn.style.opacity = '0.5'; }
+  } else {
+    if (flashAnswer) flashAnswer.classList.add('hidden');
+    const showBtn = document.getElementById('showAnswerBtn');
+    if (showBtn) { showBtn.disabled = false; showBtn.style.opacity = ''; }
+  }
+}
+
+let nextDebounce = false;
+
+function flashShowAnswer() {
+  state.flash.answerShown = true;
+  renderFlashView();
+}
+
+function flashNextCard() {
+  if (nextDebounce) return;
+  nextDebounce = true;
+  setTimeout(() => { nextDebounce = false; }, 300);
+  
+  const { queue, index } = state.flash;
+  if (index + 1 >= queue.length) {
+    state.flash.done = true;
+    state.flash.answerShown = false;
+  } else {
+    state.flash.index = index + 1;
+    state.flash.answerShown = false;
+  }
+  renderFlashView();
+}
+
+function flashReviewAgain() {
+  if (!state.selectedDate) return;
+  const queue = state.topics.filter(t => t.reviewDates?.includes(state.selectedDate));
+  state.flash = { queue, index: 0, answerShown: false, done: false };
+  renderFlashView();
+}
+
+// ========== MODE SWITCHING ==========
+function switchMode(mode) {
+  state.mode = mode;
+  state.hoverDates = [];
+  
+  document.querySelectorAll('.menu-item[data-mode]').forEach(el => {
+    if (el.dataset.mode === mode) el.classList.add('active');
+    else el.classList.remove('active');
+  });
+  
+  document.getElementById('viewSR').classList.toggle('hidden', mode !== 'sr');
+  document.getElementById('viewJournal').classList.toggle('hidden', mode !== 'journal');
+  document.getElementById('viewFlash').classList.toggle('hidden', mode !== 'flashcard');
+  
+  const calSection = document.getElementById('calSection');
+  if (mode === 'flashcard') {
+    calSection.style.display = 'none';
+  } else {
+    calSection.style.display = 'block';
+  }
+  
+  renderCalendar();
+  
+  if (mode === 'sr') renderSRView();
+  else if (mode === 'journal') renderJournalView();
+  else if (mode === 'flashcard') initFlashQueue();
+}
+
+// ========== TOPIC MODAL ==========
+let manualDates = [];
+let editingId = null;
 
 function openAddModal() {
-  modalEditId = null;
-  modalManualDates = [];
-  document.getElementById('modalTitle').textContent = 'Add Topic';
-  document.getElementById('editTopicId').value = '';
-  document.getElementById('topicTitle').value = '';
-  document.getElementById('topicContent').value = '';
-  document.getElementById('topicStartDate').value = state.selectedDate || todayStr();
+  editingId = null;
+  manualDates = [];
+  document.getElementById('topicModalTitle').textContent = 'Add Topic';
+  document.getElementById('editId').value = '';
+  document.getElementById('fTitle').value = '';
+  document.getElementById('fContent').value = '';
+  document.getElementById('fDate').value = state.selectedDate || todayStr();
   setModalMode('auto');
-  updateSchedulePreview();
-  openModal('topicModalBackdrop');
+  updateSchedPreview();
+  openModal('topicModalBack');
 }
 
 function openEditModal(id) {
   const topic = state.topics.find(t => t.id === id);
   if (!topic) return;
-  modalEditId = id;
-  modalManualDates = topic.mode === 'manual' ? [...topic.reviewDates] : [];
-  document.getElementById('modalTitle').textContent = 'Edit Topic';
-  document.getElementById('editTopicId').value = id;
-  document.getElementById('topicTitle').value = topic.title;
-  document.getElementById('topicContent').value = topic.content || '';
-  document.getElementById('topicStartDate').value = topic.startDate;
+  editingId = id;
+  manualDates = topic.mode === 'manual' && topic.reviewDates ? [...topic.reviewDates] : [];
+  document.getElementById('topicModalTitle').textContent = 'Edit Topic';
+  document.getElementById('editId').value = id;
+  document.getElementById('fTitle').value = topic.title;
+  document.getElementById('fContent').value = topic.content || '';
+  document.getElementById('fDate').value = topic.startDate;
   setModalMode(topic.mode);
-  updateSchedulePreview();
-  openModal('topicModalBackdrop');
-}
-
-function setModalMode(mode) {
-  document.getElementById('modeAutoBtn').classList.toggle('active', mode === 'auto');
-  document.getElementById('modeManualBtn').classList.toggle('active', mode === 'manual');
-  document.getElementById('manualSection').classList.toggle('hidden', mode !== 'manual');
-  document.getElementById('manualDays').value = '';
+  updateSchedPreview();
+  openModal('topicModalBack');
 }
 
 function getModalMode() {
-  return document.getElementById('modeAutoBtn').classList.contains('active') ? 'auto' : 'manual';
+  const autoBtn = document.getElementById('mAutoBtn');
+  return autoBtn?.classList.contains('active') ? 'auto' : 'manual';
 }
 
-function updateSchedulePreview() {
-  const preview = document.getElementById('schedulePreview');
-  if (getModalMode() !== 'manual') { preview.textContent = ''; return; }
-  if (modalManualDates.length === 0) {
-    const start = document.getElementById('topicStartDate').value;
-    if (start) preview.textContent = `Schedule: ${start}`;
-    else preview.textContent = 'Set a start date first.';
+function setModalMode(mode) {
+  const autoBtn = document.getElementById('mAutoBtn');
+  const manualBtn = document.getElementById('mManualBtn');
+  const manualSection = document.getElementById('manualSection');
+  if (autoBtn) autoBtn.classList.toggle('active', mode === 'auto');
+  if (manualBtn) manualBtn.classList.toggle('active', mode === 'manual');
+  if (manualSection) manualSection.style.display = mode === 'manual' ? 'block' : 'none';
+}
+
+function updateSchedPreview() {
+  const p = document.getElementById('schedPreview');
+  if (!p) return;
+  if (getModalMode() !== 'manual') { p.textContent = ''; return; }
+  if (!manualDates.length) {
+    const s = document.getElementById('fDate')?.value;
+    p.textContent = s ? `Schedule: ${s}` : 'Set a start date first.';
     return;
   }
-  preview.textContent = 'Schedule: ' + modalManualDates.join(' → ');
+  p.textContent = 'Schedule: ' + manualDates.join(' → ');
 }
 
 function saveTopic() {
-  const title = document.getElementById('topicTitle').value.trim();
-  const content = document.getElementById('topicContent').value.trim();
-  const startDate = document.getElementById('topicStartDate').value;
+  const title = document.getElementById('fTitle')?.value.trim();
+  const content = document.getElementById('fContent')?.value.trim();
+  const startDate = document.getElementById('fDate')?.value;
   const mode = getModalMode();
-
+  
   if (!title) { alert('Please enter a topic title.'); return; }
   if (!startDate) { alert('Please enter a start date.'); return; }
-
+  
   let reviewDates;
   if (mode === 'auto') {
-    reviewDates = calcAutoReviewDates(startDate);
+    reviewDates = calcAutoReviews(startDate);
   } else {
-    if (modalManualDates.length === 0) {
-      reviewDates = [startDate];
-    } else {
-      reviewDates = modalManualDates[0] === startDate ? modalManualDates : [startDate, ...modalManualDates.slice(1)];
-    }
+    if (!manualDates.length) manualDates = [startDate];
+    reviewDates = manualDates[0] === startDate ? manualDates : [startDate, ...manualDates.slice(1)];
   }
-
-  if (modalEditId !== null) {
-    const idx = state.topics.findIndex(t => t.id === modalEditId);
-    if (idx !== -1) {
-      state.topics[idx] = { ...state.topics[idx], title, content, startDate, mode, reviewDates };
-    }
+  
+  if (editingId !== null) {
+    const i = state.topics.findIndex(t => t.id === editingId);
+    if (i !== -1) state.topics[i] = { ...state.topics[i], title, content, startDate, mode, reviewDates };
   } else {
     state.topics.push({ id: Date.now(), title, content, startDate, mode, reviewDates });
   }
-
+  
   saveData();
-  closeModal('topicModalBackdrop');
+  closeModal('topicModalBack');
   renderCalendar();
-  renderSRPanel();
+  if (state.mode === 'sr') renderSRView();
+  else if (state.mode === 'flashcard') initFlashQueue();
 }
 
-// ===================================================
-// MODAL: DELETE
-// ===================================================
-
+// ========== DELETE MODAL ==========
 let pendingDeleteId = null;
 
 function openDeleteModal(id) {
   pendingDeleteId = id;
-  openModal('deleteModalBackdrop');
+  openModal('deleteModalBack');
 }
 
 function confirmDelete() {
@@ -516,271 +554,243 @@ function confirmDelete() {
   state.topics = state.topics.filter(t => t.id !== pendingDeleteId);
   pendingDeleteId = null;
   saveData();
-  closeModal('deleteModalBackdrop');
+  closeModal('deleteModalBack');
   renderCalendar();
-  renderSRPanel();
+  if (state.mode === 'sr') renderSRView();
+  else if (state.mode === 'flashcard') initFlashQueue();
 }
 
-// ===================================================
-// MODAL HELPERS
-// ===================================================
-
+// ========== MODAL HELPERS ==========
 function openModal(id) {
-  document.getElementById(id).classList.add('open');
-  document.body.style.overflow = 'hidden';
+  const modal = document.getElementById(id);
+  if (modal) {
+    modal.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
 }
 
 function closeModal(id) {
-  document.getElementById(id).classList.remove('open');
-  document.body.style.overflow = '';
+  const modal = document.getElementById(id);
+  if (modal) {
+    modal.classList.remove('open');
+    document.body.style.overflow = '';
+  }
 }
 
-// ===================================================
-// EXPORT / IMPORT
-// ===================================================
-
-function exportData() {
-  const payload = { topics: state.topics, journalNotes: state.journalNotes };
-  const json = JSON.stringify(payload, null, 2);
-  const blob = new Blob([json], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `mnemo-backup-${todayStr()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+// ========== MENU ==========
+function openMenu() {
+  document.getElementById('sideMenu')?.classList.add('open');
+  document.getElementById('menuOverlay')?.classList.add('active');
 }
 
-function importData(file) {
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const parsed = JSON.parse(e.target.result);
-      state.topics = parsed.topics || [];
-      state.journalNotes = parsed.journalNotes || {};
-      saveData();
-      renderCalendar();
-      renderPanel();
-      alert('Data imported successfully!');
-    } catch {
-      alert('Invalid JSON file. Please select a valid backup.');
-    }
+function closeMenu() {
+  document.getElementById('sideMenu')?.classList.remove('open');
+  document.getElementById('menuOverlay')?.classList.remove('active');
+}
+
+// ========== THEME MANAGEMENT (with custom modal - NO ALERTS) ==========
+let pendingTheme = null;
+
+function loadTheme() {
+  const savedTheme = localStorage.getItem('mnemo_theme') || 'parchment';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  updateActiveThemeButton(savedTheme);
+}
+
+function openThemeConfirmModal(themeName) {
+  pendingTheme = themeName;
+  
+  const themeNames = {
+    'highcontrast': 'High Contrast / Minimal',
+    'forest': 'Forest / Muted Green',
+    'darkink': 'Dark Ink',
+    'parchment': 'Parchment / Light',
+    'magenta': 'Magenta Dark Pink'
   };
-  reader.readAsText(file);
+  
+  const confirmText = document.getElementById('themeConfirmText');
+  if (confirmText) {
+    confirmText.textContent = `Switch to ${themeNames[themeName]} theme?`;
+  }
+  
+  openModal('themeConfirmModal');
 }
 
-// ===================================================
-// ESCAPE HTML
-// ===================================================
-
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function applyTheme() {
+  if (pendingTheme) {
+    document.documentElement.setAttribute('data-theme', pendingTheme);
+    localStorage.setItem('mnemo_theme', pendingTheme);
+    updateActiveThemeButton(pendingTheme);
+    pendingTheme = null;
+    closeModal('themeConfirmModal');
+  }
 }
 
-// ===================================================
-// MODE SWITCHING — complete separation
-// ===================================================
+function cancelTheme() {
+  pendingTheme = null;
+  closeModal('themeConfirmModal');
+}
 
-function switchMode(mode) {
-  state.mode = mode;
-
-  // Update menu items
-  document.querySelectorAll('.menu-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.mode === mode);
+function updateActiveThemeButton(activeTheme) {
+  const themeButtons = document.querySelectorAll('.sidemenu-body .menu-item[data-theme]');
+  themeButtons.forEach(btn => {
+    if (btn.dataset.theme === activeTheme) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
   });
-
-  // Show/hide panels — complete separation, no tabs
-  document.getElementById('panelSR').classList.toggle('hidden', mode !== 'sr');
-  document.getElementById('panelJournal').classList.toggle('hidden', mode !== 'journal');
-
-  // Update mode label in topbar
-  const label = document.getElementById('modeLabel');
-  label.textContent = mode === 'sr' ? '🔄 Spaced Repetition' : '📔 Journal';
-
-  renderCalendar();
-  renderPanel();
 }
 
-// ===================================================
-// INIT & EVENT LISTENERS
-// ===================================================
+// ========== HELPERS ==========
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/[&<>]/g, function(m) {
+    if (m === '&') return '&amp;';
+    if (m === '<') return '&lt;';
+    if (m === '>') return '&gt;';
+    return m;
+  });
+}
 
+// ========== INIT ==========
 function init() {
   loadData();
-
+  loadTheme();
+  
   const now = new Date();
-  state.currentYear = now.getFullYear();
-  state.currentMonth = now.getMonth();
+  state.year = now.getFullYear();
+  state.month = now.getMonth();
   state.selectedDate = todayStr();
-
-  setupEventListeners();
-  renderCalendar();
-  renderPanel();
-}
-
-function setupEventListeners() {
-
-  // --- Nav ---
-  document.getElementById('prevMonth').addEventListener('click', () => {
-    if (state.currentMonth === 0) { state.currentMonth = 11; state.currentYear--; }
-    else state.currentMonth--;
-    state.hoverReviewDates = [];
+  
+  // Setup event listeners
+  document.getElementById('prevMonth')?.addEventListener('click', () => {
+    if (state.month === 0) { state.month = 11; state.year--; }
+    else state.month--;
     renderCalendar();
   });
-
-  document.getElementById('nextMonth').addEventListener('click', () => {
-    if (state.currentMonth === 11) { state.currentMonth = 0; state.currentYear++; }
-    else state.currentMonth++;
-    state.hoverReviewDates = [];
+  
+  document.getElementById('nextMonth')?.addEventListener('click', () => {
+    if (state.month === 11) { state.month = 0; state.year++; }
+    else state.month++;
     renderCalendar();
   });
-
-  document.getElementById('todayBtn').addEventListener('click', () => {
+  
+  document.getElementById('todayBtn')?.addEventListener('click', () => {
     const now = new Date();
-    state.currentYear = now.getFullYear();
-    state.currentMonth = now.getMonth();
+    state.year = now.getFullYear();
+    state.month = now.getMonth();
     state.selectedDate = todayStr();
-    state.hoverReviewDates = [];
     renderCalendar();
-    renderPanel();
+    if (state.mode === 'sr') renderSRView();
+    else if (state.mode === 'journal') renderJournalView();
+    else if (state.mode === 'flashcard') initFlashQueue();
   });
-
-  // --- Hamburger / Side menu ---
-  document.getElementById('hamburgerBtn').addEventListener('click', () => {
-    document.getElementById('sideMenu').classList.add('open');
-    document.getElementById('menuOverlay').classList.add('active');
+  
+  document.getElementById('hamburgerBtn')?.addEventListener('click', openMenu);
+  document.getElementById('menuClose')?.addEventListener('click', closeMenu);
+  document.getElementById('menuOverlay')?.addEventListener('click', closeMenu);
+  
+  document.querySelectorAll('.menu-item[data-mode]').forEach(btn => {
+    btn.addEventListener('click', () => { switchMode(btn.dataset.mode); closeMenu(); });
   });
-
-  function closeMenu() {
-    document.getElementById('sideMenu').classList.remove('open');
-    document.getElementById('menuOverlay').classList.remove('active');
-  }
-
-  document.getElementById('menuClose').addEventListener('click', closeMenu);
-  document.getElementById('menuOverlay').addEventListener('click', closeMenu);
-
-  document.querySelectorAll('.menu-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-      switchMode(btn.dataset.mode);
+  
+  // Theme button listeners - open custom modal (NO ALERT)
+  const themeButtons = document.querySelectorAll('.sidemenu-body .menu-item[data-theme]');
+  themeButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const currentTheme = document.documentElement.getAttribute('data-theme') || 'parchment';
+      if (currentTheme !== btn.dataset.theme) {
+        openThemeConfirmModal(btn.dataset.theme);
+      }
       closeMenu();
     });
   });
-
-  // --- Add Topic ---
-  document.getElementById('addTopicBtn').addEventListener('click', openAddModal);
-
-  // --- Modal controls ---
-  document.getElementById('modalClose').addEventListener('click', () => closeModal('topicModalBackdrop'));
-  document.getElementById('cancelTopicBtn').addEventListener('click', () => closeModal('topicModalBackdrop'));
-  document.getElementById('topicModalBackdrop').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeModal('topicModalBackdrop');
+  
+  // Theme modal event listeners
+  document.getElementById('themeModalClose')?.addEventListener('click', cancelTheme);
+  document.getElementById('cancelThemeBtn')?.addEventListener('click', cancelTheme);
+  document.getElementById('confirmThemeBtn')?.addEventListener('click', applyTheme);
+  document.getElementById('themeConfirmModal')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) cancelTheme();
   });
-
-  document.getElementById('saveTopicBtn').addEventListener('click', saveTopic);
-
-  document.getElementById('modeAutoBtn').addEventListener('click', () => {
-    setModalMode('auto');
-    updateSchedulePreview();
-  });
-  document.getElementById('modeManualBtn').addEventListener('click', () => {
-    const start = document.getElementById('topicStartDate').value;
-    if (start && modalManualDates.length === 0) modalManualDates = [start];
+  
+  document.getElementById('addTopicBtn')?.addEventListener('click', openAddModal);
+  document.getElementById('topicModalClose')?.addEventListener('click', () => closeModal('topicModalBack'));
+  document.getElementById('cancelTopicBtn')?.addEventListener('click', () => closeModal('topicModalBack'));
+  document.getElementById('saveTopicBtn')?.addEventListener('click', saveTopic);
+  
+  document.getElementById('mAutoBtn')?.addEventListener('click', () => { setModalMode('auto'); updateSchedPreview(); });
+  document.getElementById('mManualBtn')?.addEventListener('click', () => {
+    const s = document.getElementById('fDate')?.value;
+    if (s && !manualDates.length) manualDates = [s];
     setModalMode('manual');
-    updateSchedulePreview();
+    updateSchedPreview();
   });
-
-  document.getElementById('topicStartDate').addEventListener('change', () => {
+  
+  document.getElementById('fDate')?.addEventListener('change', () => {
     if (getModalMode() === 'manual') {
-      const start = document.getElementById('topicStartDate').value;
-      modalManualDates = start ? [start] : [];
+      const s = document.getElementById('fDate')?.value;
+      manualDates = s ? [s] : [];
+      updateSchedPreview();
     }
-    updateSchedulePreview();
   });
-
-  document.getElementById('manualSaveBtn').addEventListener('click', () => {
-    const days = parseInt(document.getElementById('manualDays').value, 10);
+  
+  document.getElementById('mSaveBtn')?.addEventListener('click', () => {
+    const days = parseInt(document.getElementById('fDays')?.value, 10);
     if (isNaN(days) || days < 1) { alert('Enter a positive number of days.'); return; }
-    const startDate = document.getElementById('topicStartDate').value;
-    if (!startDate) { alert('Please set a start date first.'); return; }
-    const newDate = addDays(startDate, days);
-    if (modalManualDates.length === 0) modalManualDates = [startDate];
-    if (modalManualDates.length > 1) {
-      modalManualDates = [modalManualDates[0], newDate];
-    } else {
-      modalManualDates = [modalManualDates[0], newDate];
-    }
-    document.getElementById('manualDays').value = '';
-    updateSchedulePreview();
+    const start = document.getElementById('fDate')?.value;
+    if (!start) { alert('Please set a start date first.'); return; }
+    if (!manualDates.length) manualDates = [start];
+    manualDates = [manualDates[0], addDays(start, days)];
+    document.getElementById('fDays').value = '';
+    updateSchedPreview();
   });
-
-  document.getElementById('manualNextBtn').addEventListener('click', () => {
-    const days = parseInt(document.getElementById('manualDays').value, 10);
+  
+  document.getElementById('mNextBtn')?.addEventListener('click', () => {
+    const days = parseInt(document.getElementById('fDays')?.value, 10);
     if (isNaN(days) || days < 1) { alert('Enter a positive number of days.'); return; }
-    const startDate = document.getElementById('topicStartDate').value;
-    if (!startDate) { alert('Please set a start date first.'); return; }
-    if (modalManualDates.length === 0) modalManualDates = [startDate];
-    const last = modalManualDates[modalManualDates.length - 1];
-    modalManualDates.push(addDays(last, days));
-    document.getElementById('manualDays').value = '';
-    updateSchedulePreview();
+    const start = document.getElementById('fDate')?.value;
+    if (!start) { alert('Please set a start date first.'); return; }
+    if (!manualDates.length) manualDates = [start];
+    manualDates.push(addDays(manualDates[manualDates.length-1], days));
+    document.getElementById('fDays').value = '';
+    updateSchedPreview();
   });
-
-  // --- Delete modal ---
-  document.getElementById('deleteModalClose').addEventListener('click', () => closeModal('deleteModalBackdrop'));
-  document.getElementById('cancelDeleteBtn').addEventListener('click', () => closeModal('deleteModalBackdrop'));
-  document.getElementById('deleteModalBackdrop').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeModal('deleteModalBackdrop');
-  });
-  document.getElementById('confirmDeleteBtn').addEventListener('click', confirmDelete);
-
-  // --- Export / Import ---
-  document.getElementById('exportBtn').addEventListener('click', exportData);
-
-  document.getElementById('importBtn').addEventListener('click', () => {
-    document.getElementById('importFile').value = '';
-    document.getElementById('importFile').click();
-  });
-  document.getElementById('importFile').addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (file) importData(file);
-  });
-
-  // --- Journal textarea autosave ---
-  document.getElementById('journalTextarea').addEventListener('input', () => {
-    const text = document.getElementById('journalTextarea').value;
+  
+  document.getElementById('deleteModalClose')?.addEventListener('click', () => closeModal('deleteModalBack'));
+  document.getElementById('cancelDeleteBtn')?.addEventListener('click', () => closeModal('deleteModalBack'));
+  document.getElementById('confirmDeleteBtn')?.addEventListener('click', confirmDelete);
+  
+  document.getElementById('journalTA')?.addEventListener('input', () => {
+    const text = document.getElementById('journalTA').value;
     updateJournalStats(text);
-
-    const autosave = document.getElementById('journalAutosave');
-    autosave.textContent = '…saving';
-    autosave.className = 'journal-autosave saving';
-
-    clearTimeout(journalSaveTimer);
-    journalSaveTimer = setTimeout(() => {
+    clearTimeout(journalTimer);
+    journalTimer = setTimeout(() => {
       if (state.selectedDate) {
         state.journalNotes[state.selectedDate] = text;
         saveData();
         renderCalendar();
       }
-      autosave.textContent = '✓ Saved';
-      autosave.className = 'journal-autosave';
     }, 1000);
   });
-
-  // --- Keyboard Esc closes modals ---
+  
+  document.getElementById('showAnswerBtn')?.addEventListener('click', flashShowAnswer);
+  document.getElementById('nextCardBtn')?.addEventListener('click', flashNextCard);
+  document.getElementById('reviewAgainBtn')?.addEventListener('click', flashReviewAgain);
+  
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      closeModal('topicModalBackdrop');
-      closeModal('deleteModalBackdrop');
+      closeModal('topicModalBack');
+      closeModal('deleteModalBack');
+      closeModal('themeConfirmModal');
       closeMenu();
     }
   });
+  
+  renderCalendar();
+  switchMode('sr');
 }
 
-// ===================================================
-// START
-// ===================================================
 document.addEventListener('DOMContentLoaded', init);
